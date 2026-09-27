@@ -1,0 +1,13 @@
+{
+  "name": "verse-sales-mailer",
+  "version": "1.0.0",
+  "description": "STUPIDS (Verse) satislarini izleyip e-posta gonderen bot",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.4",
+    "nodemailer": "^6.9.16"
+  }
+}
