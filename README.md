@@ -13,7 +13,7 @@ Sale Price: 0.05 ETH
 NFT Name: STUPIDS #73
 Buyer: 0x2222…2222
 Seller: 0x1111…1111
-Link: https://verse.works/items/ethereum/0x00c2…7f1b/12
+Link: https://verse.works/series/stupids-by-demon-ego/activity
 ```
 
 - **Price** is read from the transaction itself. It can be ETH bought on a marketplace, an accepted
@@ -59,5 +59,5 @@ Link: https://verse.works/items/ethereum/0x00c2…7f1b/12
 
 - The bot watches from the moment it starts and does not email past sales. To start from an
   earlier point, set `START_BLOCK` to a block number.
-- If the item link format on Verse changes, set `ITEM_URL`. Use `{contract}` and `{id}` as
-  placeholders.
+- Every email links to the collection's activity page on Verse. To change the link, set
+  `SALES_URL`.

@@ -82,8 +82,8 @@ const lc = (a) => (a || '').toLowerCase();
 const WETH = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
 const ITEM_NAME = process.env.ITEM_NAME || COLLECTION_NAME;           // fallback name: "STUPIDS #<token id>"
 const IPFS_GATEWAY = process.env.IPFS_GATEWAY || 'https://ipfs.io/ipfs/';
-const ITEM_URL = process.env.ITEM_URL || 'https://verse.works/items/ethereum/{contract}/{id}';
-const itemLink = (id) => ITEM_URL.replace('{contract}', CONTRACT).replace('{id}', id);
+// The same link in every email: the collection's activity (sales) page on Verse
+const SALES_URL = process.env.SALES_URL || 'https://verse.works/series/stupids-by-demon-ego/activity';
 const addrLink = (a) => `https://etherscan.io/address/${a}`;
 
 const erc20 = new ethers.Interface([
@@ -184,7 +184,7 @@ async function nftName(id) {
 // ---------- Notification ----------
 async function sendSale(e) {
   const name = await nftName(e.tokenId);
-  const link = itemLink(e.tokenId);
+  const link = SALES_URL;
   const subject = `${e.test ? '[TEST] ' : ''}${name} sold for ${e.price}`;
   const row = (label, value) =>
     `<tr><td style="color:#666;padding:4px 16px 4px 0;white-space:nowrap">${label}</td><td style="padding:4px 0">${value}</td></tr>`;
