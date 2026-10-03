@@ -185,13 +185,14 @@ async function nftName(id) {
 async function sendSale(e) {
   const name = await nftName(e.tokenId);
   const link = itemLink(e.tokenId);
-  const subject = `${name} sold for ${e.price}`;
+  const subject = `${e.test ? '[TEST] ' : ''}${name} sold for ${e.price}`;
   const row = (label, value) =>
     `<tr><td style="color:#666;padding:4px 16px 4px 0;white-space:nowrap">${label}</td><td style="padding:4px 0">${value}</td></tr>`;
   const html = `
     <div style="font-family:Arial,sans-serif;max-width:520px">
       <h2 style="margin:0">${COLLECTION_NAME}</h2>
       <div style="color:#666;margin:2px 0 14px">Sold on secondary</div>
+      ${e.test ? '<div style="color:#b45309;margin:0 0 14px">Test email: example price and addresses, not a real sale.</div>' : ''}
       <table style="font-size:14px;border-collapse:collapse">
         ${row('Sale Price:', `<b>${e.price}</b>`)}
         ${row('NFT Name:', name)}
@@ -203,6 +204,7 @@ async function sendSale(e) {
   const text = [
     COLLECTION_NAME,
     'Sold on secondary',
+    ...(e.test ? ['Test email: example price and addresses, not a real sale.'] : []),
     '',
     `Sale Price: ${e.price}`,
     `NFT Name: ${name}`,
@@ -258,11 +260,14 @@ async function main() {
   console.log(`Email via ${RESEND_API_KEY ? 'Resend' : 'Gmail SMTP'} → ${MAIL_TO}`);
 
   if ((process.env.TEST_MAIL || '').trim().toLowerCase() === 'true') {
+    // Sample sale email in the real format (example price and addresses, real NFT name and link)
     try {
-      await deliver({
-        subject: `${COLLECTION_NAME} bot test`,
-        text: 'The bot is running. New sales will be emailed to this address.',
-        html: '<p>The bot is running. New sales will be emailed to this address.</p>',
+      await sendSale({
+        test: true,
+        tokenId: process.env.TEST_TOKEN_ID || '12',
+        from: '0x1111111111111111111111111111111111111111',
+        to: '0x2222222222222222222222222222222222222222',
+        price: '0.05 ETH',
       });
       console.log('Test email sent.');
     } catch (err) {

@@ -44,8 +44,8 @@ Link: https://verse.works/items/ethereum/0x00c2…7f1b/12
 1. Railway → **New Project** → **Deploy from GitHub** → select this repository.
 2. Under **Variables**, enter the values from `.env.example`. At minimum, set `MAIL_TO` and
    `RESEND_API_KEY`.
-3. If `TEST_MAIL=true`, the bot sends a test email on start. Once it arrives, set `TEST_MAIL` to
-   `false`.
+3. If `TEST_MAIL=true`, the bot sends a sample sale email (marked `[TEST]`) on start. Once it
+   arrives, set `TEST_MAIL` to `false`.
 4. Optional: add a Volume and set `STATE_FILE=/data/state.json`. With this, a redeploy continues
    from where the bot stopped and does not skip sales.
 
