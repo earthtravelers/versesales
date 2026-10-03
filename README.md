@@ -1,27 +1,62 @@
-# STUPIDS satış bildirimi botu
+# STUPIDS sales notification bot
 
-Verse'teki STUPIDS koleksiyonunun Ethereum kontratını (0x00c2…7f1b) izler.
-Her yeni mint (Verse'te satış) ve her transfer (ikincil satış / cüzdana çekme) için e-posta gönderir.
+Watches the STUPIDS collection contract on Ethereum (`0x00c2…7f1b`) and sends an email for every
+**secondary sale**, with the sale price.
 
-## 1. Gmail uygulama şifresi al
-1. Google hesabında 2 adımlı doğrulama açık olmalı.
-2. https://myaccount.google.com/apppasswords → isim ver ("STUPIDS bot") → Oluştur.
-3. Çıkan 16 haneli şifreyi kopyala (boşluksuz).
+Example email:
 
-## 2. Railway'e kur (satış botunla aynı yöntem)
-1. Bu klasörü yeni bir GitHub reposuna yükle.
-2. Railway → New Project → Deploy from GitHub → bu repoyu seç.
-3. Variables sekmesine `.env.example` içindeki değerleri gir
-   (en az MAIL_TO, GMAIL_USER, GMAIL_APP_PASSWORD).
-4. İlk çalışmada TEST_MAIL=true ise sana bir test e-postası gelir. Geldiyse TEST_MAIL'i false yap.
+```
+STUPID
+Sold on secondary
 
-## Bilgisayarda denemek için
-    cp .env.example .env   # değerleri doldur
+Sale Price: 0.05 ETH
+NFT Name: STUPID #12
+Buyer: 0x2222…2222
+Seller: 0x1111…1111
+Link: https://verse.works/items/ethereum/0x00c2…7f1b/12
+```
+
+- **Price** is read from the transaction itself. It can be ETH bought on a marketplace, an accepted
+  WETH offer (the full price including fees), or the average price per item when several NFTs were
+  bought together.
+- **Transfers without a payment** (an owner moving an NFT to another wallet) are not sales and are
+  not emailed.
+- A sale paid off-chain (for example, by card) is still emailed, with the price shown as "unknown".
+
+## 1. Email setup
+
+**Resend (recommended, works on Railway):**
+
+1. Create a free account at <https://resend.com> and create an API key.
+2. Set `RESEND_API_KEY`. Without a verified domain, Resend can only send to the email address you
+   signed up with. Use that address as `MAIL_TO`.
+
+**Gmail (only when running on your own computer; Railway blocks SMTP):**
+
+1. Turn on 2-Step Verification for your Google account.
+2. Go to <https://myaccount.google.com/apppasswords>, create an app password, and copy the 16
+   characters without spaces.
+3. Set `GMAIL_USER` and `GMAIL_APP_PASSWORD`.
+
+## 2. Deploy on Railway
+
+1. Railway → **New Project** → **Deploy from GitHub** → select this repository.
+2. Under **Variables**, enter the values from `.env.example`. At minimum, set `MAIL_TO` and
+   `RESEND_API_KEY`.
+3. If `TEST_MAIL=true`, the bot sends a test email on start. Once it arrives, set `TEST_MAIL` to
+   `false`.
+4. Optional: add a Volume and set `STATE_FILE=/data/state.json`. With this, a redeploy continues
+   from where the bot stopped and does not skip sales.
+
+## Run on your own computer
+
+    cp .env.example .env   # fill in the values
     npm install
     npm start
 
-## Notlar
-- Bot başlatıldığı andan itibaren izler; geçmiş satışlar için e-posta atmaz.
-  Geçmişten başlatmak istersen START_BLOCK değişkenine bir blok numarası ver.
-- Transfer e-postası istemiyorsan NOTIFY_TRANSFERS=false yap (sadece yeni mintler gelir).
-- Aynı blokta birden fazla satış olursa tek e-postada toplanır.
+## Notes
+
+- The bot watches from the moment it starts and does not email past sales. To start from an
+  earlier point, set `START_BLOCK` to a block number.
+- If the item link format on Verse changes, set `ITEM_URL`. Use `{contract}` and `{id}` as
+  placeholders.

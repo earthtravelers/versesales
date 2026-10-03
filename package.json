@@ -1,7 +1,7 @@
 {
   "name": "verse-sales-mailer",
   "version": "1.0.0",
-  "description": "STUPIDS (Verse) satislarini izleyip e-posta gonderen bot",
+  "description": "Emails every secondary sale of the STUPIDS (Verse) collection with its price",
   "main": "index.js",
   "scripts": { "start": "node index.js" },
   "engines": { "node": ">=18" },

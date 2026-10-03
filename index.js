@@ -1,6 +1,6 @@
-// STUPIDS (Verse) satis bildirimi botu
-// Ethereum'daki koleksiyon kontratini izler; her yeni mint (birincil satis) ve
-// transfer (ikincil satis / cuzdan cekme) icin e-posta gonderir.
+// STUPIDS (Verse) sales notification bot
+// Watches the collection contract on Ethereum and sends an email with the price for every secondary sale.
+// Transfers without a payment (an owner moving the NFT to another wallet) are not sales and are not reported.
 
 require('dotenv').config();
 const fs = require('fs');
@@ -8,26 +8,24 @@ const path = require('path');
 const { ethers } = require('ethers');
 const nodemailer = require('nodemailer');
 
-// ---------- Ayarlar ----------
+// ---------- Settings ----------
 const CONTRACT = (process.env.CONTRACT || '0x00c2d197bc6a99c916b0b6bc405c23186ede7f1b').toLowerCase();
 const COLLECTION_NAME = process.env.COLLECTION_NAME || 'STUPIDS';
-const TOTAL = Number(process.env.TOTAL_SUPPLY || 200);
 const RPC_URL = process.env.RPC_URL || 'https://ethereum-rpc.publicnode.com';
 const POLL_MS = Number(process.env.POLL_SECONDS || 60) * 1000;
-const CONFIRMATIONS = 2;          // yeniden duzenlenen bloklari atlamak icin
-const MAX_RANGE = 2000;           // RPC getLogs blok araligi siniri
+const CONFIRMATIONS = 2;          // skip blocks that may still be reorganized
+const MAX_RANGE = 2000;           // max block range per RPC getLogs call
 const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'state.json');
-const NOTIFY_TRANSFERS = process.env.NOTIFY_TRANSFERS !== 'false';
 
 const MAIL_TO = process.env.MAIL_TO;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
-// Resend: alan adi dogrulamadan yalnizca Resend hesabini actigin adrese gonderebilir.
+// Resend: without a verified domain it can only send to the address you signed up with.
 const MAIL_FROM = process.env.MAIL_FROM || `${process.env.COLLECTION_NAME || 'STUPIDS'} Bot <onboarding@resend.dev>`;
 const GMAIL_USER = process.env.GMAIL_USER;
 const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
 
 if (!MAIL_TO || (!RESEND_API_KEY && !(GMAIL_USER && GMAIL_APP_PASSWORD))) {
-  console.error('Eksik ayar: MAIL_TO ve RESEND_API_KEY tanimli olmali (ya da Gmail icin GMAIL_USER + GMAIL_APP_PASSWORD).');
+  console.error('Missing settings: MAIL_TO and RESEND_API_KEY are required (or GMAIL_USER + GMAIL_APP_PASSWORD for Gmail).');
   process.exit(1);
 }
 
@@ -37,14 +35,12 @@ const ZERO = '0x0000000000000000000000000000000000000000';
 const provider = new ethers.JsonRpcProvider(RPC_URL, 1, { staticNetwork: true });
 const iface = new ethers.Interface([
   'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
-  'function totalSupply() view returns (uint256)',
 ]);
 const TRANSFER_TOPIC = iface.getEvent('Transfer').topicHash;
-const contract = new ethers.Contract(CONTRACT, iface, provider);
 
-// ---------- E-posta ----------
-// Railway, Pro plan disinda SMTP'yi engelledigi icin varsayilan yol Resend (HTTPS API).
-// RESEND_API_KEY yoksa Gmail SMTP kullanilir (bilgisayarda calistirirken).
+// ---------- Email ----------
+// Railway blocks SMTP outside the Pro plan, so the default is Resend (HTTPS API).
+// Without RESEND_API_KEY, Gmail SMTP is used (e.g. when running on your own computer).
 const gmail = RESEND_API_KEY ? null : nodemailer.createTransport({
   service: 'gmail',
   auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
@@ -58,13 +54,13 @@ async function deliver({ subject, text, html }) {
       headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ from: MAIL_FROM, to: [MAIL_TO], subject, text, html }),
     });
-    if (!res.ok) throw new Error(`Resend hatasi ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new Error(`Resend error ${res.status}: ${await res.text()}`);
     return;
   }
   await gmail.sendMail({ from: `"${COLLECTION_NAME} Bot" <${GMAIL_USER}>`, to: MAIL_TO, subject, text, html });
 }
 
-// ---------- Durum (kaldigi yeri hatirlamak icin) ----------
+// ---------- State (remembers where it left off) ----------
 function loadState() {
   try {
     return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
@@ -78,79 +74,113 @@ function saveState() {
 }
 const state = loadState();
 
-// ---------- Yardimcilar ----------
+// ---------- Helpers ----------
 const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
-const blockTimes = new Map();
-async function blockTime(n) {
-  if (!blockTimes.has(n)) {
-    const b = await provider.getBlock(n);
-    blockTimes.set(n, b ? b.timestamp : Math.floor(Date.now() / 1000));
-  }
-  return new Date(blockTimes.get(n) * 1000).toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul' });
-}
-async function mintedCount() {
-  try {
-    return Number(await contract.totalSupply());
-  } catch {
-    return null; // kontrat totalSupply desteklemiyorsa
-  }
-}
-const links = (id, tx) => ({
-  verse: `https://verse.works/items/ethereum/${CONTRACT}/${id}`,
-  opensea: `https://opensea.io/assets/ethereum/${CONTRACT}/${id}`,
-  tx: `https://etherscan.io/tx/${tx}`,
-});
+const lc = (a) => (a || '').toLowerCase();
+const WETH = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
+const ITEM_NAME = process.env.ITEM_NAME || 'STUPID';                  // "STUPID #12"
+const ITEM_URL = process.env.ITEM_URL || 'https://verse.works/items/ethereum/{contract}/{id}';
+const itemLink = (id) => ITEM_URL.replace('{contract}', CONTRACT).replace('{id}', id);
+const addrLink = (a) => `https://etherscan.io/address/${a}`;
 
-// ---------- Bildirim ----------
-async function sendMail(events) {
-  const mints = events.filter((e) => e.type === 'mint');
-  const transfers = events.filter((e) => e.type === 'transfer');
-  const count = await mintedCount();
+const erc20 = new ethers.Interface([
+  'function symbol() view returns (string)',
+  'function decimals() view returns (uint8)',
+]);
+const tokenInfo = new Map([[WETH, { symbol: 'WETH', decimals: 18 }]]);
+async function tokenMeta(addr) {
+  if (!tokenInfo.has(addr)) {
+    const c = new ethers.Contract(addr, erc20, provider);
+    const [symbol, decimals] = await Promise.all([c.symbol().catch(() => '?'), c.decimals().catch(() => 18)]);
+    tokenInfo.set(addr, { symbol, decimals: Number(decimals) });
+  }
+  return tokenInfo.get(addr);
+}
 
+const fmt = (wei, decimals) => {
+  const s = ethers.formatUnits(wei, decimals);
+  return s.includes('.') ? s.replace(/\.?0+$/, '') : s;
+};
+
+// The sale price is read from the transaction itself:
+//  - Payer: whoever sent the transaction; if the seller sent it (accepting an offer), the buyer.
+//  - ETH: the transaction value when the payer sent it. WETH etc.: token transfers out of the payer.
+//  - Several NFTs in one transaction (sweep): the total is divided by the number of NFTs.
+// No payment and the seller sent the transaction: not a sale but a wallet transfer -> null.
+async function salePrice(log, seller, buyer) {
+  const [tx, receipt] = await Promise.all([
+    provider.getTransaction(log.transactionHash),
+    provider.getTransactionReceipt(log.transactionHash),
+  ]);
+  const sender = lc(tx.from);
+  const payer = sender === lc(seller) ? lc(buyer) : sender;
+
+  const totals = new Map(); // 'ETH' | token adresi -> toplam (bigint)
+  if (sender === payer && tx.value > 0n) totals.set('ETH', tx.value);
+  let items = 0;
+  for (const l of receipt.logs) {
+    if (l.topics[0] !== TRANSFER_TOPIC) continue;
+    if (lc(l.address) === CONTRACT) {
+      if (l.topics.length === 4 && lc(ethers.dataSlice(l.topics[1], 12)) !== ZERO) items++;
+      continue;
+    }
+    if (l.topics.length !== 3) continue; // ERC20: from/to indexed, amount in data
+    if (lc(ethers.dataSlice(l.topics[1], 12)) !== payer) continue;
+    const token = lc(l.address);
+    totals.set(token, (totals.get(token) || 0n) + BigInt(l.data));
+  }
+
+  if (!totals.size) {
+    if (sender === lc(seller)) return null; // the owner moved the NFT to another wallet
+    return { text: 'unknown (paid off-chain)' };
+  }
+  items = Math.max(items, 1);
   const parts = [];
-  if (mints.length) parts.push(`${mints.length} yeni mint`);
-  if (transfers.length) parts.push(`${transfers.length} transfer`);
-  const subject = `${COLLECTION_NAME}: ${parts.join(', ')}${count !== null ? ` (${count}/${TOTAL})` : ''}`;
-
-  const rows = events.map((e) => {
-    const l = links(e.tokenId, e.tx);
-    const title = e.type === 'mint'
-      ? `🟢 Yeni mint — #${e.tokenId}`
-      : `🔁 Transfer — #${e.tokenId}`;
-    const who = e.type === 'mint'
-      ? `Alıcı: ${e.to}`
-      : `Gönderen: ${e.from}<br>Alan: ${e.to}`;
-    return `
-      <div style="padding:14px 0;border-bottom:1px solid #eee">
-        <div style="font-size:16px;font-weight:bold">${title}</div>
-        <div style="color:#555;font-size:13px;margin:4px 0">${e.time}</div>
-        <div style="font-size:13px;font-family:monospace">${who}</div>
-        <div style="margin-top:6px;font-size:13px">
-          <a href="${l.verse}">Verse</a> · <a href="${l.opensea}">OpenSea</a> · <a href="${l.tx}">Etherscan</a>
-        </div>
-      </div>`;
-  }).join('');
-
-  const html = `
-    <div style="font-family:Arial,sans-serif;max-width:560px">
-      <h2 style="margin:0 0 4px">${COLLECTION_NAME}</h2>
-      ${count !== null ? `<div style="color:#555">Toplam mint: <b>${count}/${TOTAL}</b></div>` : ''}
-      ${rows}
-      <div style="color:#999;font-size:11px;margin-top:12px">Kontrat: ${CONTRACT}</div>
-    </div>`;
-
-  const text = events.map((e) => {
-    const l = links(e.tokenId, e.tx);
-    return e.type === 'mint'
-      ? `Yeni mint #${e.tokenId} — alıcı ${e.to} — ${e.time}\n${l.verse}\n${l.tx}`
-      : `Transfer #${e.tokenId} — ${e.from} → ${e.to} — ${e.time}\n${l.verse}\n${l.tx}`;
-  }).join('\n\n');
-
-  await deliver({ subject, text, html });
-  console.log(`E-posta gönderildi: ${subject}`);
+  for (const [token, total] of totals) {
+    const each = total / BigInt(items);
+    if (token === 'ETH') parts.push(`${fmt(each, 18)} ETH`);
+    else {
+      const t = await tokenMeta(token);
+      parts.push(`${fmt(each, t.decimals)} ${t.symbol}`);
+    }
+  }
+  return { text: parts.join(' + ') + (items > 1 ? ` (avg. of ${items} items bought together)` : '') };
 }
 
-// ---------- Izleme dongusu ----------
+// ---------- Notification ----------
+async function sendSale(e) {
+  const name = `${ITEM_NAME} #${e.tokenId}`;
+  const link = itemLink(e.tokenId);
+  const subject = `${name} sold for ${e.price}`;
+  const row = (label, value) =>
+    `<tr><td style="color:#666;padding:4px 16px 4px 0;white-space:nowrap">${label}</td><td style="padding:4px 0">${value}</td></tr>`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:520px">
+      <h2 style="margin:0">${ITEM_NAME}</h2>
+      <div style="color:#666;margin:2px 0 14px">Sold on secondary</div>
+      <table style="font-size:14px;border-collapse:collapse">
+        ${row('Sale Price:', `<b>${e.price}</b>`)}
+        ${row('NFT Name:', name)}
+        ${row('Buyer:', `<a href="${addrLink(e.to)}" style="font-family:monospace">${short(e.to)}</a>`)}
+        ${row('Seller:', `<a href="${addrLink(e.from)}" style="font-family:monospace">${short(e.from)}</a>`)}
+        ${row('Link:', `<a href="${link}">${link}</a>`)}
+      </table>
+    </div>`;
+  const text = [
+    ITEM_NAME,
+    'Sold on secondary',
+    '',
+    `Sale Price: ${e.price}`,
+    `NFT Name: ${name}`,
+    `Buyer: ${short(e.to)}`,
+    `Seller: ${short(e.from)}`,
+    `Link: ${link}`,
+  ].join('\n');
+  await deliver({ subject, text, html });
+  console.log(`Email sent: ${subject}`);
+}
+
+// ---------- Watch loop ----------
 async function poll() {
   const latest = await provider.getBlockNumber();
   const safe = latest - CONFIRMATIONS;
@@ -158,7 +188,7 @@ async function poll() {
   if (state.lastBlock === null) {
     state.lastBlock = Number(process.env.START_BLOCK || safe);
     saveState();
-    console.log(`İzleme ${state.lastBlock}. bloktan başlıyor.`);
+    console.log(`Watching from block ${state.lastBlock}.`);
     return;
   }
 
@@ -167,29 +197,20 @@ async function poll() {
     const to = Math.min(from + MAX_RANGE - 1, safe);
     const logs = await provider.getLogs({ address: CONTRACT, topics: [TRANSFER_TOPIC], fromBlock: from, toBlock: to });
 
-    const events = [];
     for (const log of logs) {
       const key = `${log.transactionHash}:${log.index}`;
       if (state.sent.includes(key)) continue;
       const parsed = iface.parseLog(log);
-      if (!parsed) continue;
-      const fromAddr = parsed.args.from.toLowerCase();
-      const type = fromAddr === ZERO ? 'mint' : 'transfer';
-      if (type === 'transfer' && !NOTIFY_TRANSFERS) continue;
-      events.push({
-        key,
-        type,
-        tokenId: parsed.args.tokenId.toString(),
-        from: parsed.args.from,
-        to: parsed.args.to,
-        tx: log.transactionHash,
-        time: await blockTime(log.blockNumber),
-      });
-    }
-
-    if (events.length) {
-      await sendMail(events);             // e-posta basarisiz olursa hata firlatir, blok ilerlemez
-      state.sent.push(...events.map((e) => e.key));
+      if (!parsed || lc(parsed.args.from) === ZERO) continue; // mints are not reported (secondary sales only)
+      const price = await salePrice(log, parsed.args.from, parsed.args.to);
+      if (price) {
+        // a failed email throws, so the block is retried; emails already sent are not repeated
+        await sendSale({ tokenId: parsed.args.tokenId.toString(), from: parsed.args.from, to: parsed.args.to, price: price.text });
+      } else {
+        console.log(`Not a sale (wallet transfer), skipped: #${parsed.args.tokenId} ${log.transactionHash}`);
+      }
+      state.sent.push(key);
+      saveState();
     }
     state.lastBlock = to;
     saveState();
@@ -198,20 +219,20 @@ async function poll() {
 }
 
 async function main() {
-  console.log(`${COLLECTION_NAME} botu çalışıyor — kontrat ${CONTRACT}, her ${POLL_MS / 1000} sn kontrol.`);
+  console.log(`${COLLECTION_NAME} bot running — contract ${CONTRACT}, checking every ${POLL_MS / 1000} s.`);
 
-  console.log(`E-posta yolu: ${RESEND_API_KEY ? 'Resend' : 'Gmail SMTP'} → ${MAIL_TO}`);
+  console.log(`Email via ${RESEND_API_KEY ? 'Resend' : 'Gmail SMTP'} → ${MAIL_TO}`);
 
   if ((process.env.TEST_MAIL || '').trim().toLowerCase() === 'true') {
     try {
       await deliver({
-        subject: `${COLLECTION_NAME} bot testi`,
-        text: 'Bot çalışıyor. Yeni satışlarda bu adrese e-posta gelecek.',
-        html: '<p>Bot çalışıyor. Yeni satışlarda bu adrese e-posta gelecek.</p>',
+        subject: `${COLLECTION_NAME} bot test`,
+        text: 'The bot is running. New sales will be emailed to this address.',
+        html: '<p>The bot is running. New sales will be emailed to this address.</p>',
       });
-      console.log('Test e-postası gönderildi.');
+      console.log('Test email sent.');
     } catch (err) {
-      console.error('Test e-postası gönderilemedi:', err.message);
+      console.error('Test email failed:', err.message);
     }
   }
 
@@ -219,10 +240,12 @@ async function main() {
     try {
       await poll();
     } catch (err) {
-      console.error('Hata (bir sonraki turda tekrar denenecek):', err.message);
+      console.error('Error (will retry next round):', err.message);
     }
     await new Promise((r) => setTimeout(r, POLL_MS));
   }
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { salePrice, sendSale, _provider: provider };
