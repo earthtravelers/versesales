@@ -6,11 +6,11 @@ Watches the STUPIDS collection contract on Ethereum (`0x00c2…7f1b`) and sends 
 Example email:
 
 ```
-STUPID
+STUPIDS
 Sold on secondary
 
 Sale Price: 0.05 ETH
-NFT Name: STUPID #12
+NFT Name: STUPIDS #73
 Buyer: 0x2222…2222
 Seller: 0x1111…1111
 Link: https://verse.works/items/ethereum/0x00c2…7f1b/12
@@ -19,6 +19,7 @@ Link: https://verse.works/items/ethereum/0x00c2…7f1b/12
 - **Price** is read from the transaction itself. It can be ETH bought on a marketplace, an accepted
   WETH offer (the full price including fees), or the average price per item when several NFTs were
   bought together.
+- **NFT name** is read from the NFT's metadata (the token ID is not the number in the name).
 - **Transfers without a payment** (an owner moving an NFT to another wallet) are not sales and are
   not emailed.
 - A sale paid off-chain (for example, by card) is still emailed, with the price shown as "unknown".
