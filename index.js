@@ -35,10 +35,8 @@ const ZERO = '0x0000000000000000000000000000000000000000';
 const provider = new ethers.JsonRpcProvider(RPC_URL, 1, { staticNetwork: true });
 const iface = new ethers.Interface([
   'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
-  'function tokenURI(uint256 tokenId) view returns (string)',
 ]);
 const TRANSFER_TOPIC = iface.getEvent('Transfer').topicHash;
-const nftContract = new ethers.Contract(CONTRACT, iface, provider);
 
 // ---------- Email ----------
 // Railway blocks SMTP outside the Pro plan, so the default is Resend (HTTPS API).
@@ -80,8 +78,6 @@ const state = loadState();
 const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const lc = (a) => (a || '').toLowerCase();
 const WETH = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
-const ITEM_NAME = process.env.ITEM_NAME || COLLECTION_NAME;           // fallback name: "STUPIDS #<token id>"
-const IPFS_GATEWAY = process.env.IPFS_GATEWAY || 'https://ipfs.io/ipfs/';
 // The same link in every email: the collection's activity (sales) page on Verse
 const SALES_URL = process.env.SALES_URL || 'https://verse.works/series/stupids-by-demon-ego/activity';
 const addrLink = (a) => `https://etherscan.io/address/${a}`;
@@ -150,42 +146,11 @@ async function salePrice(log, seller, buyer) {
   return { text: parts.join(' + ') + (items > 1 ? ` (avg. of ${items} items bought together)` : '') };
 }
 
-// The NFT's real name from its metadata. The token ID is not the number in the name
-// (token 12 is "STUPIDS #73"), so "<ITEM_NAME> #<id>" is only a fallback.
-const names = new Map();
-function metadataUrl(uri) {
-  if (uri.startsWith('ipfs://')) return IPFS_GATEWAY + uri.slice(7).replace(/^ipfs\//, '');
-  if (uri.startsWith('ar://')) return 'https://arweave.net/' + uri.slice(5);
-  return uri;
-}
-async function nftName(id) {
-  if (names.has(id)) return names.get(id);
-  try {
-    const uri = await nftContract.tokenURI(id);
-    let meta;
-    const data = uri.match(/^data:application\/json(;base64)?,(.*)$/s);
-    if (data) {
-      meta = JSON.parse(data[1] ? Buffer.from(data[2], 'base64').toString('utf8') : decodeURIComponent(data[2]));
-    } else {
-      const res = await fetch(metadataUrl(uri), { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) throw new Error(`metadata HTTP ${res.status}`);
-      meta = await res.json();
-    }
-    if (meta && meta.name) {
-      names.set(id, String(meta.name));
-      return names.get(id);
-    }
-  } catch (err) {
-    console.error(`Could not read the name of token ${id}:`, err.message);
-  }
-  return `${ITEM_NAME} #${id}`; // not cached: retried next time
-}
-
 // ---------- Notification ----------
 async function sendSale(e) {
-  const name = await nftName(e.tokenId);
+  // No NFT name: the on-chain token ID does not match the number in the NFT's name on Verse
   const link = SALES_URL;
-  const subject = `${e.test ? '[TEST] ' : ''}${name} sold for ${e.price}`;
+  const subject = `${e.test ? '[TEST] ' : ''}${COLLECTION_NAME} Collection Piece Sold For ${e.price}`;
   const row = (label, value) =>
     `<tr><td style="color:#666;padding:4px 16px 4px 0;white-space:nowrap">${label}</td><td style="padding:4px 0">${value}</td></tr>`;
   const html = `
@@ -195,7 +160,6 @@ async function sendSale(e) {
       ${e.test ? '<div style="color:#b45309;margin:0 0 14px">Test email: example price and addresses, not a real sale.</div>' : ''}
       <table style="font-size:14px;border-collapse:collapse">
         ${row('Sale Price:', `<b>${e.price}</b>`)}
-        ${row('NFT Name:', name)}
         ${row('Buyer:', `<a href="${addrLink(e.to)}" style="font-family:monospace">${short(e.to)}</a>`)}
         ${row('Seller:', `<a href="${addrLink(e.from)}" style="font-family:monospace">${short(e.from)}</a>`)}
         ${row('Link:', `<a href="${link}">${link}</a>`)}
@@ -207,7 +171,6 @@ async function sendSale(e) {
     ...(e.test ? ['Test email: example price and addresses, not a real sale.'] : []),
     '',
     `Sale Price: ${e.price}`,
-    `NFT Name: ${name}`,
     `Buyer: ${short(e.to)}`,
     `Seller: ${short(e.from)}`,
     `Link: ${link}`,
@@ -264,7 +227,6 @@ async function main() {
     try {
       await sendSale({
         test: true,
-        tokenId: process.env.TEST_TOKEN_ID || '12',
         from: '0x1111111111111111111111111111111111111111',
         to: '0x2222222222222222222222222222222222222222',
         price: '0.05 ETH',
@@ -287,4 +249,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { salePrice, sendSale, nftName, _provider: provider, _nft: nftContract };
+module.exports = { salePrice, sendSale, _provider: provider };
