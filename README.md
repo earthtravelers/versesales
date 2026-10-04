@@ -11,11 +11,20 @@ Subject: STUPIDS Collection Piece Sold For 0.05 ETH
 STUPIDS
 Sold on secondary
 
-Sale Price: 0.05 ETH
+Sale Price: 0.05 ETH (≈ $150)
 Buyer: 0x2222…2222
 Seller: 0x1111…1111
 Link: https://verse.works/series/stupids-by-demon-ego/activity
+
+Total secondary volume: 1.25 ETH (≈ $3,750) — 23 sales
+Your 10% share: 0.125 ETH (≈ $375)
 ```
+
+- **Totals:** On first start, the bot counts the past secondary sales of the last `BACKFILL_DAYS` days (90 by
+  default) once, then adds every new sale. WETH is counted as ETH. Sales paid off-chain are left out and noted.
+- **USD** values use the current ETH price from the Chainlink ETH/USD price feed on Ethereum (no API key).
+- **Your share** is `ROYALTY_PCT` (10% by default) of the total volume. It is a calculation, not what you were
+  actually paid: some marketplaces do not enforce creator royalties.
 
 - **Price** is read from the transaction itself. It can be ETH bought on a marketplace, an accepted
   WETH offer (the full price including fees), or the average price per item when several NFTs were
@@ -46,8 +55,9 @@ Link: https://verse.works/series/stupids-by-demon-ego/activity
    `RESEND_API_KEY`.
 3. If `TEST_MAIL=true`, the bot sends a sample sale email (marked `[TEST]`, example price and addresses) on start. Once it
    arrives, set `TEST_MAIL` to `false`.
-4. Optional: add a Volume and set `STATE_FILE=/data/state.json`. With this, a redeploy continues
-   from where the bot stopped and does not skip sales.
+4. Recommended: add a Volume and set `STATE_FILE=/data/state.json`. With this, a redeploy continues
+   from where the bot stopped and keeps the totals. Without it, the bot counts past sales again after every
+   redeploy, which takes a few minutes.
 
 ## Run on your own computer
 

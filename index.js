@@ -16,6 +16,10 @@ const POLL_MS = Number(process.env.POLL_SECONDS || 60) * 1000;
 const CONFIRMATIONS = 2;          // skip blocks that may still be reorganized
 const MAX_RANGE = 2000;           // max block range per RPC getLogs call
 const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'state.json');
+const ROYALTY_PCT = Number(process.env.ROYALTY_PCT || 10);            // your share of secondary sales
+const BACKFILL_DAYS = Number(process.env.BACKFILL_DAYS || 90);        // how far back past sales are counted
+const BLOCKS_PER_DAY = 7200;
+const BACKFILL_RANGES_PER_ROUND = 50;                                 // 100k blocks per round, then new sales again
 
 const MAIL_TO = process.env.MAIL_TO;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
@@ -62,11 +66,15 @@ async function deliver({ subject, text, html }) {
 
 // ---------- State (remembers where it left off) ----------
 function loadState() {
+  let s;
   try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
   } catch {
-    return { lastBlock: null, sent: [] };
+    s = { lastBlock: null, sent: [] };
   }
+  // totals: secondary sales volume. ethWei = ETH + WETH; others = other tokens; unknown = paid off-chain
+  s.totals = s.totals || { ethWei: '0', sales: 0, unknown: 0, others: {} };
+  return s;
 }
 function saveState() {
   state.sent = state.sent.slice(-1000);
@@ -131,25 +139,83 @@ async function salePrice(log, seller, buyer) {
 
   if (!totals.size) {
     if (sender === lc(seller)) return null; // the owner moved the NFT to another wallet
-    return { text: 'unknown (paid off-chain)' };
+    return { text: 'unknown (paid off-chain)', unknown: true, ethWei: 0n, others: {} };
   }
   items = Math.max(items, 1);
   const parts = [];
+  let ethWei = 0n;
+  const others = {};
   for (const [token, total] of totals) {
     const each = total / BigInt(items);
-    if (token === 'ETH') parts.push(`${fmt(each, 18)} ETH`);
-    else {
+    if (token === 'ETH' || token === WETH) {
+      ethWei += each;
+      parts.push(`${fmt(each, 18)} ${token === 'ETH' ? 'ETH' : 'WETH'}`);
+    } else {
       const t = await tokenMeta(token);
       parts.push(`${fmt(each, t.decimals)} ${t.symbol}`);
+      others[t.symbol] = Number(ethers.formatUnits(each, t.decimals));
     }
   }
-  return { text: parts.join(' + ') + (items > 1 ? ` (avg. of ${items} items bought together)` : '') };
+  return { text: parts.join(' + ') + (items > 1 ? ` (avg. of ${items} items bought together)` : ''), ethWei, others };
+}
+
+// ---------- Totals and USD ----------
+// ETH/USD from the Chainlink price feed on Ethereum (same RPC, no API key). Cached 5 minutes.
+const ETH_USD_FEED = '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419';
+const feed = new ethers.Contract(ETH_USD_FEED, [
+  'function latestRoundData() view returns (uint80, int256, uint256, uint256, uint80)',
+], provider);
+let ethUsdCache = { at: 0, price: null };
+async function ethUsd() {
+  if (Date.now() - ethUsdCache.at < 5 * 60 * 1000) return ethUsdCache.price;
+  try {
+    const r = await feed.latestRoundData();
+    ethUsdCache = { at: Date.now(), price: Number(r[1]) / 1e8 };
+  } catch (err) {
+    console.error('ETH/USD price unavailable:', err.message);
+    ethUsdCache = { at: Date.now() - 4 * 60 * 1000, price: null }; // retry in a minute
+  }
+  return ethUsdCache.price;
+}
+
+function addSale(totals, price) {
+  if (price.unknown) {
+    totals.unknown += 1;
+    return;
+  }
+  totals.sales += 1;
+  totals.ethWei = (BigInt(totals.ethWei) + price.ethWei).toString();
+  for (const [sym, amount] of Object.entries(price.others)) totals.others[sym] = (totals.others[sym] || 0) + amount;
+}
+
+const ethNum = (wei) => Number(ethers.formatEther(wei));
+const fmtEth = (x) => `${x.toLocaleString('en-US', { maximumFractionDigits: 4 })} ETH`;
+const fmtUsd = (x) => `$${x.toLocaleString('en-US', { maximumFractionDigits: x < 100 ? 2 : 0 })}`;
+function amountLine(eth, others, usdPrice) {
+  let s = fmtEth(eth) + (usdPrice ? ` (≈ ${fmtUsd(eth * usdPrice)})` : '');
+  for (const [sym, x] of Object.entries(others)) s += ` + ${x.toLocaleString('en-US', { maximumFractionDigits: 2 })} ${sym}`;
+  return s;
+}
+
+function scale(others, k) {
+  return Object.fromEntries(Object.entries(others).map(([sym, x]) => [sym, x * k]));
 }
 
 // ---------- Notification ----------
 async function sendSale(e) {
   // No NFT name: the on-chain token ID does not match the number in the NFT's name on Verse
   const link = SALES_URL;
+  const usd = await ethUsd();
+  const t = e.totals;
+  const volEth = ethNum(t.ethWei);
+  const share = ROYALTY_PCT / 100;
+  const priceLine = e.price + (usd && e.ethWei ? ` (≈ ${fmtUsd(ethNum(e.ethWei) * usd)})` : '');
+  const volumeLine = `${amountLine(volEth, t.others, usd)} — ${t.sales} sale${t.sales === 1 ? '' : 's'}`;
+  const shareLine = amountLine(volEth * share, scale(t.others, share), usd);
+  const notes = [];
+  if (usd) notes.push(`USD at the current ETH price (1 ETH ≈ ${fmtUsd(usd)}).`);
+  if (t.unknown) notes.push(`${t.unknown} sale(s) paid off-chain are not included.`);
+  if (e.counting) notes.push('Past sales are still being counted; the totals will grow.');
   const subject = `${e.test ? '[TEST] ' : ''}${COLLECTION_NAME} Collection Piece Sold For ${e.price}`;
   const row = (label, value) =>
     `<tr><td style="color:#666;padding:4px 16px 4px 0;white-space:nowrap">${label}</td><td style="padding:4px 0">${value}</td></tr>`;
@@ -159,21 +225,29 @@ async function sendSale(e) {
       <div style="color:#666;margin:2px 0 14px">Sold on secondary</div>
       ${e.test ? '<div style="color:#b45309;margin:0 0 14px">Test email: example price and addresses, not a real sale.</div>' : ''}
       <table style="font-size:14px;border-collapse:collapse">
-        ${row('Sale Price:', `<b>${e.price}</b>`)}
+        ${row('Sale Price:', `<b>${priceLine}</b>`)}
         ${row('Buyer:', `<a href="${addrLink(e.to)}" style="font-family:monospace">${short(e.to)}</a>`)}
         ${row('Seller:', `<a href="${addrLink(e.from)}" style="font-family:monospace">${short(e.from)}</a>`)}
         ${row('Link:', `<a href="${link}">${link}</a>`)}
+        <tr><td colspan="2" style="padding:8px 0 0"></td></tr>
+        ${row('Total secondary volume:', volumeLine)}
+        ${row(`Your ${ROYALTY_PCT}% share:`, `<b>${shareLine}</b>`)}
       </table>
+      ${notes.length ? `<div style="color:#999;font-size:11px;margin-top:10px">${notes.join('<br>')}</div>` : ''}
     </div>`;
   const text = [
     COLLECTION_NAME,
     'Sold on secondary',
     ...(e.test ? ['Test email: example price and addresses, not a real sale.'] : []),
     '',
-    `Sale Price: ${e.price}`,
+    `Sale Price: ${priceLine}`,
     `Buyer: ${short(e.to)}`,
     `Seller: ${short(e.from)}`,
     `Link: ${link}`,
+    '',
+    `Total secondary volume: ${volumeLine}`,
+    `Your ${ROYALTY_PCT}% share: ${shareLine}`,
+    ...(notes.length ? ['', ...notes] : []),
   ].join('\n');
   await deliver({ subject, text, html });
   console.log(`Email sent: ${subject}`);
@@ -191,6 +265,7 @@ async function poll() {
     return;
   }
 
+  startBackfill(); // before live watching moves lastBlock: past = up to here, live = after here
   let from = state.lastBlock + 1;
   while (from <= safe) {
     const to = Math.min(from + MAX_RANGE - 1, safe);
@@ -203,8 +278,13 @@ async function poll() {
       if (!parsed || lc(parsed.args.from) === ZERO) continue; // mints are not reported (secondary sales only)
       const price = await salePrice(log, parsed.args.from, parsed.args.to);
       if (price) {
-        // a failed email throws, so the block is retried; emails already sent are not repeated
-        await sendSale({ tokenId: parsed.args.tokenId.toString(), from: parsed.args.from, to: parsed.args.to, price: price.text });
+        // Totals include this sale; they are saved only after the email went out, because a failed
+        // email throws and the block is retried (the sale must not be counted twice)
+        const totals = JSON.parse(JSON.stringify(state.totals));
+        addSale(totals, price);
+        await sendSale({ from: parsed.args.from, to: parsed.args.to, price: price.text, ethWei: price.ethWei,
+                         totals, counting: !(state.backfill && state.backfill.done) });
+        state.totals = totals;
       } else {
         console.log(`Not a sale (wallet transfer), skipped: #${parsed.args.tokenId} ${log.transactionHash}`);
       }
@@ -214,6 +294,42 @@ async function poll() {
     state.lastBlock = to;
     saveState();
     from = to + 1;
+  }
+  await backfill();
+}
+
+// Counts past secondary sales once (no emails): from BACKFILL_DAYS ago up to where live watching began.
+// Live watching counts everything after that block, so no sale is counted twice.
+function startBackfill() {
+  if (state.backfill) return;
+  const end = state.lastBlock;
+  const start = Number(process.env.STATS_START_BLOCK || Math.max(0, end - BACKFILL_DAYS * BLOCKS_PER_DAY));
+  state.backfill = { next: start, end, done: false };
+  saveState();
+  console.log(`Counting past sales from block ${start} to ${end}...`);
+}
+
+async function backfill() {
+  if (!state.backfill || state.backfill.done) return;
+  const b = state.backfill;
+  for (let i = 0; i < BACKFILL_RANGES_PER_ROUND && b.next <= b.end; i++) {
+    const to = Math.min(b.next + MAX_RANGE - 1, b.end);
+    const logs = await provider.getLogs({ address: CONTRACT, topics: [TRANSFER_TOPIC], fromBlock: b.next, toBlock: to });
+    const totals = JSON.parse(JSON.stringify(state.totals));
+    for (const log of logs) {
+      const parsed = iface.parseLog(log);
+      if (!parsed || lc(parsed.args.from) === ZERO) continue;
+      const price = await salePrice(log, parsed.args.from, parsed.args.to);
+      if (price) addSale(totals, price);
+    }
+    state.totals = totals; // the whole range or nothing: a failure retries the range
+    b.next = to + 1;
+    saveState();
+  }
+  if (b.next > b.end) {
+    b.done = true;
+    saveState();
+    console.log(`Past sales counted: ${state.totals.sales} sales, ${fmtEth(ethNum(state.totals.ethWei))}.`);
   }
 }
 
@@ -230,6 +346,9 @@ async function main() {
         from: '0x1111111111111111111111111111111111111111',
         to: '0x2222222222222222222222222222222222222222',
         price: '0.05 ETH',
+        ethWei: ethers.parseEther('0.05'),
+        totals: state.totals,
+        counting: !(state.backfill && state.backfill.done),
       });
       console.log('Test email sent.');
     } catch (err) {
@@ -249,4 +368,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { salePrice, sendSale, _provider: provider };
+module.exports = { salePrice, sendSale, addSale, poll, backfill, _provider: provider, _state: state };
